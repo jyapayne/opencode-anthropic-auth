@@ -583,7 +583,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("x-stainless-timeout")).toBe("600");
     expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
     expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
-    expect(headers.get("anthropic-beta")).toContain("context-1m-2025-08-07");
+    expect(headers.get("anthropic-beta")).not.toContain("context-1m-2025-08-07");
     expect(headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12");
     expect(headers.get("anthropic-beta")).toContain("advanced-tool-use-2025-11-20");
     expect(headers.get("anthropic-beta")).not.toContain("adaptive-thinking-2026-01-28");
