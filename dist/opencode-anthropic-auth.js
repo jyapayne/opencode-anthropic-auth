@@ -3334,13 +3334,8 @@ function extractModelName(body) {
 }
 var OPENCODE_IDENTITY = "You are OpenCode, the best coding agent on the planet.";
 var CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
-var PARAGRAPH_REMOVAL_ANCHORS = [
-  "github.com/anomalyco/opencode",
-  "opencode.ai/docs"
-];
-var TEXT_REPLACEMENTS = [
-  { match: "if OpenCode honestly", replacement: "if the assistant honestly" }
-];
+var PARAGRAPH_REMOVAL_ANCHORS = ["github.com/anomalyco/opencode", "opencode.ai/docs"];
+var TEXT_REPLACEMENTS = [{ match: "if OpenCode honestly", replacement: "if the assistant honestly" }];
 function sanitizeSystemText(text) {
   if (!text.includes(OPENCODE_IDENTITY)) return text;
   const paragraphs = text.split(/\n\n+/);

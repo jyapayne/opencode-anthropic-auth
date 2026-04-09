@@ -618,23 +618,7 @@ describe("fetch interceptor", () => {
     expect(url.searchParams.get("beta")).toBe("true");
   });
 
-  it("transforms system prompt: OpenCode → Claude Code, opencode → Claude", async () => {
-    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
-
-    await fetchFn("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      body: JSON.stringify({
-        system: [{ type: "text", text: "You are OpenCode, an opencode assistant." }],
-        messages: [],
-      }),
-    });
-
-    const [, init] = mockFetch.mock.calls[0];
-    const body = JSON.parse(init.body);
-    expect(body.system[0].text).toBe("You are Claude Code, an Claude assistant.");
-  });
-
-  it("strips OpenCode identity line from system prompt", async () => {
+  it("sanitizes system prompt: strips OpenCode identity and anchored paragraphs", async () => {
     mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
 
     await fetchFn("https://api.anthropic.com/v1/messages", {
@@ -646,15 +630,43 @@ describe("fetch interceptor", () => {
             text: "You are OpenCode, the best coding agent on the planet.\n\nYou are an interactive CLI tool.",
           },
         ],
-        messages: [],
+        messages: [{ role: "user", content: "hello" }],
       }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    // Identity line stripped; remaining text still gets OpenCode->Claude Code rewrite
-    expect(body.system[0].text).not.toContain("best coding agent on the planet");
-    expect(body.system[0].text).toContain("You are an interactive CLI tool.");
+    // Identity block is the Claude Agent SDK string
+    expect(body.system[0].text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+    // System should only have the identity block (non-core relocated to user message)
+    expect(body.system).toHaveLength(1);
+    // Relocated content in first user message
+    expect(body.messages[0].content).toContain("You are an interactive CLI tool.");
+    expect(body.messages[0].content).not.toContain("best coding agent on the planet");
+  });
+
+  it("strips paragraphs containing OpenCode-specific URLs", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        system: [
+          {
+            type: "text",
+            text: "You are OpenCode, the best coding agent on the planet.\n\nFor help visit github.com/anomalyco/opencode\n\nYou are an interactive CLI tool.",
+          },
+        ],
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.system).toHaveLength(1);
+    // github.com/anomalyco/opencode paragraph removed
+    expect(body.messages[0].content).not.toContain("github.com/anomalyco/opencode");
+    expect(body.messages[0].content).toContain("You are an interactive CLI tool.");
   });
 
   it("preserves paths containing opencode in system prompt", async () => {
@@ -664,13 +676,16 @@ describe("fetch interceptor", () => {
       method: "POST",
       body: JSON.stringify({
         system: [{ type: "text", text: "Working dir: /Users/rmk/projects/opencode-auth" }],
-        messages: [],
+        messages: [{ role: "user", content: "hello" }],
       }),
     });
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(body.system[0].text).toBe("Working dir: /Users/rmk/projects/opencode-auth");
+    // Identity block prepended
+    expect(body.system[0].text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+    // Non-core content relocated to first user message
+    expect(body.messages[0].content).toContain("Working dir: /Users/rmk/projects/opencode-auth");
   });
 
   it("prefixes tool names with mcp_ in request", async () => {
@@ -920,7 +935,7 @@ describe("fetch interceptor", () => {
 
 describe("system prompt transform", () => {
   const BILLING_RE = /^x-anthropic-billing-header: cc_version=[\d.a-z]+; cc_entrypoint=cli; cch=[0-9a-f]{5};$/;
-  const PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
+  const PREFIX = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
   it("prepends Claude Code prefix for anthropic provider", async () => {
     const client = makeClient();
