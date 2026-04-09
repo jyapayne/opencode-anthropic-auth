@@ -217,6 +217,92 @@ function extractModelName(body) {
   return undefined;
 }
 
+// ---------------------------------------------------------------------------
+// System prompt sanitization constants (ported from ex-machina-co/opencode-anthropic-auth)
+// ---------------------------------------------------------------------------
+
+const OPENCODE_IDENTITY = "You are OpenCode, the best coding agent on the planet.";
+const CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+
+/**
+ * Anchors that identify paragraphs to remove from the system prompt.
+ * Any paragraph (text between blank lines) containing one of these
+ * strings is removed entirely.
+ */
+const PARAGRAPH_REMOVAL_ANCHORS = ["github.com/anomalyco/opencode", "opencode.ai/docs"];
+
+/**
+ * Inline text replacements applied after paragraph removal.
+ */
+const TEXT_REPLACEMENTS = [{ match: "if OpenCode honestly", replacement: "if the assistant honestly" }];
+
+/**
+ * Sanitize OpenCode-branded strings from the system prompt text.
+ * Removes the OpenCode identity line, paragraphs with known anchors,
+ * and applies inline text replacements.
+ */
+function sanitizeSystemText(text) {
+  if (!text.includes(OPENCODE_IDENTITY)) return text;
+
+  // Split into paragraphs (separated by one or more blank lines)
+  const paragraphs = text.split(/\n\n+/);
+
+  const filtered = paragraphs.filter((paragraph) => {
+    if (paragraph.includes(OPENCODE_IDENTITY)) {
+      if (paragraph.trim() === OPENCODE_IDENTITY) return false;
+    }
+    for (const anchor of PARAGRAPH_REMOVAL_ANCHORS) {
+      if (paragraph.includes(anchor)) return false;
+    }
+    return true;
+  });
+
+  let result = filtered.join("\n\n");
+  result = result.replace(OPENCODE_IDENTITY, "").replace(/\n{3,}/g, "\n\n");
+  for (const rule of TEXT_REPLACEMENTS) {
+    result = result.replace(rule.match, rule.replacement);
+  }
+  return result.trim();
+}
+
+/**
+ * Sanitize system prompt and prepend Claude Code identity.
+ * Handles all Anthropic API system formats: undefined, string, or array of text blocks.
+ */
+function prependClaudeCodeIdentity(system) {
+  const identityBlock = { type: "text", text: CLAUDE_CODE_IDENTITY };
+
+  if (system == null) return [identityBlock];
+
+  if (typeof system === "string") {
+    const sanitized = sanitizeSystemText(system);
+    if (sanitized === CLAUDE_CODE_IDENTITY) return [identityBlock];
+    return [identityBlock, { type: "text", text: sanitized }];
+  }
+
+  if (!Array.isArray(system)) {
+    if (typeof system === "object" && system !== null) {
+      const type = typeof system.type === "string" ? system.type : "text";
+      const text = typeof system.text === "string" ? system.text : "";
+      return [identityBlock, { ...system, type, text: sanitizeSystemText(text) }];
+    }
+    return [identityBlock];
+  }
+
+  const sanitized = system.map((item) => {
+    if (typeof item === "string") {
+      return { type: "text", text: sanitizeSystemText(item) };
+    }
+    if (item && typeof item === "object" && item.type === "text" && typeof item.text === "string") {
+      return { ...item, type: "text", text: sanitizeSystemText(item.text) };
+    }
+    return { type: "text", text: String(item) };
+  });
+
+  if (sanitized[0]?.text === CLAUDE_CODE_IDENTITY) return sanitized;
+  return [identityBlock, ...sanitized];
+}
+
 /**
  * Transform the request body: system prompt sanitization and tool prefixing.
  * Preserves behaviors E1-E7.
@@ -232,22 +318,38 @@ function transformRequestBody(body) {
   try {
     const parsed = JSON.parse(body);
 
-    // Sanitize system prompt - server blocks "OpenCode" string
-    // Note: (?<!\/) preserves paths like /path/to/opencode-foo
-    if (parsed.system && Array.isArray(parsed.system)) {
-      parsed.system = parsed.system.map((item) => {
-        if (item.type === "text" && item.text) {
-          return {
-            ...item,
-            // Strip the OpenCode identity line — the transform hook provides the correct Claude Code identity
-            text: item.text
-              .replace(/^You are OpenCode, the best coding agent on the planet\.\n*/m, "")
-              .replace(/OpenCode/g, "Claude Code")
-              .replace(/(?<!\/)opencode/gi, "Claude"),
-          };
+    // Sanitize system prompt and prepend Claude Code identity
+    parsed.system = prependClaudeCodeIdentity(parsed.system);
+
+    // --- Relocate non-core system entries to user messages ---
+    // Anthropic's API validates system[] content for OAuth requests.
+    // Third-party system prompts trigger a 400 rejection when they
+    // appear in `system[]`. Keep only the identity block in `system[]`
+    // and prepend everything else to the first user message.
+    if (Array.isArray(parsed.system) && parsed.system.length > 1) {
+      const kept = [parsed.system[0]]; // identity block
+      const movedTexts = [];
+
+      for (let i = 1; i < parsed.system.length; i++) {
+        const entry = parsed.system[i];
+        const txt = typeof entry === "string" ? entry : (entry?.text ?? "");
+        if (txt.length > 0) movedTexts.push(txt);
+      }
+
+      if (movedTexts.length > 0 && Array.isArray(parsed.messages)) {
+        const firstUser = parsed.messages.find((m) => m.role === "user");
+
+        if (firstUser) {
+          parsed.system = kept;
+          const prefix = movedTexts.join("\n\n");
+
+          if (typeof firstUser.content === "string") {
+            firstUser.content = `${prefix}\n\n${firstUser.content}`;
+          } else if (Array.isArray(firstUser.content)) {
+            firstUser.content.unshift({ type: "text", text: prefix });
+          }
         }
-        return item;
-      });
+      }
     }
 
     // Add prefix to tools definitions
@@ -1450,7 +1552,7 @@ export async function AnthropicAuthPlugin({ client }) {
   return {
     // A1-A4: System prompt transform (unchanged)
     "experimental.chat.system.transform": (input, output) => {
-      const prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
+      const prefix = CLAUDE_CODE_IDENTITY;
       if (input.model?.providerID !== "anthropic") return;
       if (!Array.isArray(output.system)) return;
 

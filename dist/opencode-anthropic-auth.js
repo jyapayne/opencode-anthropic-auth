@@ -3332,22 +3332,90 @@ function extractModelName(body) {
   }
   return void 0;
 }
+var OPENCODE_IDENTITY = "You are OpenCode, the best coding agent on the planet.";
+var CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+var PARAGRAPH_REMOVAL_ANCHORS = [
+  "github.com/anomalyco/opencode",
+  "opencode.ai/docs"
+];
+var TEXT_REPLACEMENTS = [
+  { match: "if OpenCode honestly", replacement: "if the assistant honestly" }
+];
+function sanitizeSystemText(text) {
+  if (!text.includes(OPENCODE_IDENTITY)) return text;
+  const paragraphs = text.split(/\n\n+/);
+  const filtered = paragraphs.filter((paragraph) => {
+    if (paragraph.includes(OPENCODE_IDENTITY)) {
+      if (paragraph.trim() === OPENCODE_IDENTITY) return false;
+    }
+    for (const anchor of PARAGRAPH_REMOVAL_ANCHORS) {
+      if (paragraph.includes(anchor)) return false;
+    }
+    return true;
+  });
+  let result = filtered.join("\n\n");
+  result = result.replace(OPENCODE_IDENTITY, "").replace(/\n{3,}/g, "\n\n");
+  for (const rule of TEXT_REPLACEMENTS) {
+    result = result.replace(rule.match, rule.replacement);
+  }
+  return result.trim();
+}
+function prependClaudeCodeIdentity(system) {
+  const identityBlock = { type: "text", text: CLAUDE_CODE_IDENTITY };
+  if (system == null) return [identityBlock];
+  if (typeof system === "string") {
+    const sanitized2 = sanitizeSystemText(system);
+    if (sanitized2 === CLAUDE_CODE_IDENTITY) return [identityBlock];
+    return [identityBlock, { type: "text", text: sanitized2 }];
+  }
+  if (!Array.isArray(system)) {
+    if (typeof system === "object" && system !== null) {
+      const type = typeof system.type === "string" ? system.type : "text";
+      const text = typeof system.text === "string" ? system.text : "";
+      return [identityBlock, { ...system, type, text: sanitizeSystemText(text) }];
+    }
+    return [identityBlock];
+  }
+  const sanitized = system.map((item) => {
+    if (typeof item === "string") {
+      return { type: "text", text: sanitizeSystemText(item) };
+    }
+    if (item && typeof item === "object" && item.type === "text" && typeof item.text === "string") {
+      return { ...item, type: "text", text: sanitizeSystemText(item.text) };
+    }
+    return { type: "text", text: String(item) };
+  });
+  if (sanitized[0]?.text === CLAUDE_CODE_IDENTITY) return sanitized;
+  return [identityBlock, ...sanitized];
+}
 function transformRequestBody(body) {
   if (!body || typeof body !== "string") return body;
   const TOOL_PREFIX = "mcp_";
   try {
     const parsed = JSON.parse(body);
-    if (parsed.system && Array.isArray(parsed.system)) {
-      parsed.system = parsed.system.map((item) => {
-        if (item.type === "text" && item.text) {
-          return {
-            ...item,
-            // Strip the OpenCode identity line — the transform hook provides the correct Claude Code identity
-            text: item.text.replace(/^You are OpenCode, the best coding agent on the planet\.\n*/m, "").replace(/OpenCode/g, "Claude Code").replace(/(?<!\/)opencode/gi, "Claude")
-          };
+    parsed.system = prependClaudeCodeIdentity(parsed.system);
+    if (Array.isArray(parsed.system) && parsed.system.length > 1) {
+      const kept = [parsed.system[0]];
+      const movedTexts = [];
+      for (let i = 1; i < parsed.system.length; i++) {
+        const entry = parsed.system[i];
+        const txt = typeof entry === "string" ? entry : entry?.text ?? "";
+        if (txt.length > 0) movedTexts.push(txt);
+      }
+      if (movedTexts.length > 0 && Array.isArray(parsed.messages)) {
+        const firstUser = parsed.messages.find((m) => m.role === "user");
+        if (firstUser) {
+          parsed.system = kept;
+          const prefix = movedTexts.join("\n\n");
+          if (typeof firstUser.content === "string") {
+            firstUser.content = `${prefix}
+
+${firstUser.content}`;
+          } else if (Array.isArray(firstUser.content)) {
+            firstUser.content.unshift({ type: "text", text: prefix });
+          }
         }
-        return item;
-      });
+      }
     }
     if (parsed.tools && Array.isArray(parsed.tools)) {
       parsed.tools = parsed.tools.map((tool) => ({
@@ -4123,7 +4191,7 @@ Account ${n} does not exist. You have ${stored.accounts.length} account(s).`
   return {
     // A1-A4: System prompt transform (unchanged)
     "experimental.chat.system.transform": (input, output) => {
-      const prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
+      const prefix = CLAUDE_CODE_IDENTITY;
       if (input.model?.providerID !== "anthropic") return;
       if (!Array.isArray(output.system)) return;
       for (let i = output.system.length - 1; i >= 0; i--) {
