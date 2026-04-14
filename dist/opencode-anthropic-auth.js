@@ -21,7 +21,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
 // lib/request-headers.mjs
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 var CLAUDE_CLI_2_1_50_PROFILE = {
   ccVersion: "2.1.50.b97",
   headers: {
@@ -210,10 +210,47 @@ function getDefaultBetas(profileName, model) {
   const familyBetas = family ? profile.betaByModel[family] || [] : [];
   return [...profile.betaBase, ...familyBetas];
 }
-function getBillingHeaderBlock(profileName) {
+var CCH_SALT = "59cf53e54c78";
+var CCH_POSITIONS = [4, 7, 20];
+function extractFirstUserMessageText(messages) {
+  if (!Array.isArray(messages)) return "";
+  const first = messages.find((m) => m && m.role === "user");
+  if (!first) return "";
+  if (typeof first.content === "string") return first.content;
+  if (Array.isArray(first.content)) {
+    const textBlock = first.content.find((b) => b && b.type === "text" && typeof b.text === "string");
+    return textBlock ? textBlock.text : "";
+  }
+  return "";
+}
+function computeCCH(messageText) {
+  const hash = createHash("sha256").update(messageText).digest("hex");
+  return hash.slice(0, 5);
+}
+function computeVersionSuffix(messageText, version) {
+  const cch = computeCCH(messageText);
+  const sampled = CCH_POSITIONS.map((pos) => cch[pos % cch.length]).join("");
+  const hash = createHash("sha256").update(`${CCH_SALT}${version}${sampled}`).digest("hex");
+  return hash.slice(0, 3);
+}
+function buildBillingHeaderValue(messages, profileName) {
   const profile = getHeaderProfile(profileName);
-  const cch = randomBytes(3).toString("hex").slice(0, 5);
-  return `x-anthropic-billing-header: cc_version=${profile.ccVersion}; cc_entrypoint=cli; cch=${cch};`;
+  const version = profile.ccVersion;
+  const entrypoint = getEntrypoint(profileName);
+  const messageText = extractFirstUserMessageText(messages);
+  if (!messageText) {
+    const cch2 = randomBytes(3).toString("hex").slice(0, 5);
+    return `x-anthropic-billing-header: cc_version=${version}; cc_entrypoint=${entrypoint}; cch=${cch2};`;
+  }
+  const cch = computeCCH(messageText);
+  const suffix = computeVersionSuffix(messageText, version);
+  return `x-anthropic-billing-header: cc_version=${version}.${suffix}; cc_entrypoint=${entrypoint}; cch=${cch};`;
+}
+function getEntrypoint(profileName) {
+  const profile = getHeaderProfile(profileName);
+  const ua = profile.headers["user-agent"] || "";
+  const match = ua.match(/\(external,\s*([^)]+)\)/);
+  return match ? match[1].trim() : "cli";
 }
 
 // lib/config.mjs
@@ -3102,7 +3139,7 @@ if (await detectMain()) {
 
 // lib/refresh-lock.mjs
 import { promises as fs2 } from "node:fs";
-import { createHash, randomBytes as randomBytes3 } from "node:crypto";
+import { createHash as createHash2, randomBytes as randomBytes3 } from "node:crypto";
 import { dirname as dirname3, join as join3 } from "node:path";
 var DEFAULT_LOCK_TIMEOUT_MS = 2e3;
 var DEFAULT_LOCK_BACKOFF_MS = 50;
@@ -3111,7 +3148,7 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function getLockPath(accountId) {
-  const hash = createHash("sha1").update(accountId).digest("hex").slice(0, 24);
+  const hash = createHash2("sha1").update(accountId).digest("hex").slice(0, 24);
   return join3(dirname3(getStoragePath()), "locks", `refresh-${hash}.lock`);
 }
 async function acquireRefreshLock(accountId, options = {}) {
@@ -3332,24 +3369,21 @@ function extractModelName(body) {
   }
   return void 0;
 }
-var OPENCODE_IDENTITY = "You are OpenCode, the best coding agent on the planet.";
+var OPENCODE_IDENTITY_PREFIX = "You are OpenCode";
 var CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 var PARAGRAPH_REMOVAL_ANCHORS = ["github.com/anomalyco/opencode", "opencode.ai/docs"];
 var TEXT_REPLACEMENTS = [{ match: "if OpenCode honestly", replacement: "if the assistant honestly" }];
 function sanitizeSystemText(text) {
-  if (!text.includes(OPENCODE_IDENTITY)) return text;
   const paragraphs = text.split(/\n\n+/);
   const filtered = paragraphs.filter((paragraph) => {
-    if (paragraph.includes(OPENCODE_IDENTITY)) {
-      if (paragraph.trim() === OPENCODE_IDENTITY) return false;
-    }
+    if (paragraph.includes(OPENCODE_IDENTITY_PREFIX)) return false;
     for (const anchor of PARAGRAPH_REMOVAL_ANCHORS) {
       if (paragraph.includes(anchor)) return false;
     }
     return true;
   });
   let result = filtered.join("\n\n");
-  result = result.replace(OPENCODE_IDENTITY, "").replace(/\n{3,}/g, "\n\n");
+  result = result.replace(/\n{3,}/g, "\n\n");
   for (const rule of TEXT_REPLACEMENTS) {
     result = result.replace(rule.match, rule.replacement);
   }
@@ -3383,39 +3417,26 @@ function prependClaudeCodeIdentity(system) {
   if (sanitized[0]?.text === CLAUDE_CODE_IDENTITY) return sanitized;
   return [identityBlock, ...sanitized];
 }
-function transformRequestBody(body) {
+function prefixToolName(name) {
+  return "mcp_" + name.charAt(0).toUpperCase() + name.slice(1);
+}
+function unprefixToolName(name) {
+  const stripped = name.slice(4);
+  return stripped.charAt(0).toLowerCase() + stripped.slice(1);
+}
+function transformRequestBody(body, headerConfig) {
   if (!body || typeof body !== "string") return body;
-  const TOOL_PREFIX = "mcp_";
   try {
     const parsed = JSON.parse(body);
     parsed.system = prependClaudeCodeIdentity(parsed.system);
-    if (Array.isArray(parsed.system) && parsed.system.length > 1) {
-      const kept = [parsed.system[0]];
-      const movedTexts = [];
-      for (let i = 1; i < parsed.system.length; i++) {
-        const entry = parsed.system[i];
-        const txt = typeof entry === "string" ? entry : entry?.text ?? "";
-        if (txt.length > 0) movedTexts.push(txt);
-      }
-      if (movedTexts.length > 0 && Array.isArray(parsed.messages)) {
-        const firstUser = parsed.messages.find((m) => m.role === "user");
-        if (firstUser) {
-          parsed.system = kept;
-          const prefix = movedTexts.join("\n\n");
-          if (typeof firstUser.content === "string") {
-            firstUser.content = `${prefix}
-
-${firstUser.content}`;
-          } else if (Array.isArray(firstUser.content)) {
-            firstUser.content.unshift({ type: "text", text: prefix });
-          }
-        }
-      }
+    if (headerConfig?.billing_header && Array.isArray(parsed.system)) {
+      const billingText = buildBillingHeaderValue(parsed.messages, headerConfig.emulation_profile);
+      parsed.system.unshift({ type: "text", text: billingText });
     }
     if (parsed.tools && Array.isArray(parsed.tools)) {
       parsed.tools = parsed.tools.map((tool) => ({
         ...tool,
-        name: tool.name ? `${TOOL_PREFIX}${tool.name}` : tool.name
+        name: tool.name ? prefixToolName(tool.name) : tool.name
       }));
     }
     if (parsed.messages && Array.isArray(parsed.messages)) {
@@ -3425,7 +3446,7 @@ ${firstUser.content}`;
             if (block.type === "tool_use" && block.name) {
               return {
                 ...block,
-                name: `${TOOL_PREFIX}${block.name}`
+                name: prefixToolName(block.name)
               };
             }
             return block;
@@ -3526,13 +3547,13 @@ function stripMcpPrefixFromParsedEvent(parsed) {
   if (!parsed || typeof parsed !== "object") return false;
   let modified = false;
   if (parsed.content_block && parsed.content_block.type === "tool_use" && typeof parsed.content_block.name === "string" && parsed.content_block.name.startsWith("mcp_")) {
-    parsed.content_block.name = parsed.content_block.name.slice(4);
+    parsed.content_block.name = unprefixToolName(parsed.content_block.name);
     modified = true;
   }
   if (parsed.message && Array.isArray(parsed.message.content)) {
     for (const block of parsed.message.content) {
       if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith("mcp_")) {
-        block.name = block.name.slice(4);
+        block.name = unprefixToolName(block.name);
         modified = true;
       }
     }
@@ -3540,7 +3561,7 @@ function stripMcpPrefixFromParsedEvent(parsed) {
   if (Array.isArray(parsed.content)) {
     for (const block of parsed.content) {
       if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith("mcp_")) {
-        block.name = block.name.slice(4);
+        block.name = unprefixToolName(block.name);
         modified = true;
       }
     }
@@ -4203,9 +4224,6 @@ Account ${n} does not exist. You have ${stored.accounts.length} account(s).`
         }
       }
       output.system.unshift(prefix);
-      if (config.headers.billing_header) {
-        output.system.unshift(getBillingHeaderBlock(config.headers.emulation_profile));
-      }
     },
     config: async (input) => {
       input.command ??= {};
@@ -4259,7 +4277,7 @@ ${message}`);
               const currentAuth = await getAuth();
               if (currentAuth.type !== "oauth") return fetch(input, init);
               const requestInit = init ?? {};
-              const body = transformRequestBody(requestInit.body);
+              const body = transformRequestBody(requestInit.body, config.headers);
               const modelName = extractModelName(body);
               const { requestInput, requestUrl } = transformRequestUrl(input);
               const requestMethod = String(

@@ -17,7 +17,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
 // lib/request-headers.mjs
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 var CLAUDE_CLI_2_1_50_PROFILE = {
   ccVersion: "2.1.50.b97",
   headers: {

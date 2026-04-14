@@ -10,7 +10,12 @@ import { applyOAuthCredentials, resetAccountTracking } from "./lib/account-state
 import { acquireRefreshLock, releaseRefreshLock } from "./lib/refresh-lock.mjs";
 import { resolveSlashCommandName, isDestructiveCommand, isInteractiveOnlyCommand } from "./lib/commands.mjs";
 import { isAccountSpecificError, parseRateLimitReason, parseRetryAfterHeader } from "./lib/backoff.mjs";
-import { getHeaderProfile, getDefaultBetas, getBillingHeaderBlock } from "./lib/request-headers.mjs";
+import {
+  getHeaderProfile,
+  getDefaultBetas,
+  getBillingHeaderBlock,
+  buildBillingHeaderValue,
+} from "./lib/request-headers.mjs";
 import { stripAnsi } from "./lib/util.mjs";
 
 // Stable per-process session ID, matches Claude Code behavior (one UUID per CLI invocation).
@@ -221,7 +226,7 @@ function extractModelName(body) {
 // System prompt sanitization constants (ported from ex-machina-co/opencode-anthropic-auth)
 // ---------------------------------------------------------------------------
 
-const OPENCODE_IDENTITY = "You are OpenCode, the best coding agent on the planet.";
+const OPENCODE_IDENTITY_PREFIX = "You are OpenCode";
 const CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 /**
@@ -242,15 +247,12 @@ const TEXT_REPLACEMENTS = [{ match: "if OpenCode honestly", replacement: "if the
  * and applies inline text replacements.
  */
 function sanitizeSystemText(text) {
-  if (!text.includes(OPENCODE_IDENTITY)) return text;
-
   // Split into paragraphs (separated by one or more blank lines)
   const paragraphs = text.split(/\n\n+/);
 
   const filtered = paragraphs.filter((paragraph) => {
-    if (paragraph.includes(OPENCODE_IDENTITY)) {
-      if (paragraph.trim() === OPENCODE_IDENTITY) return false;
-    }
+    // Drop any paragraph containing the OpenCode identity prefix
+    if (paragraph.includes(OPENCODE_IDENTITY_PREFIX)) return false;
     for (const anchor of PARAGRAPH_REMOVAL_ANCHORS) {
       if (paragraph.includes(anchor)) return false;
     }
@@ -258,7 +260,7 @@ function sanitizeSystemText(text) {
   });
 
   let result = filtered.join("\n\n");
-  result = result.replace(OPENCODE_IDENTITY, "").replace(/\n{3,}/g, "\n\n");
+  result = result.replace(/\n{3,}/g, "\n\n");
   for (const rule of TEXT_REPLACEMENTS) {
     result = result.replace(rule.match, rule.replacement);
   }
@@ -304,16 +306,39 @@ function prependClaudeCodeIdentity(system) {
 }
 
 /**
- * Transform the request body: system prompt sanitization and tool prefixing.
- * Preserves behaviors E1-E7.
+ * PascalCase a tool name after the mcp_ prefix.
+ * e.g. "read_file" → "mcp_Read_file"
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function prefixToolName(name) {
+  return "mcp_" + name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/**
+ * Restore original tool name from a PascalCase mcp_-prefixed name.
+ * e.g. "mcp_Read_file" → "read_file"
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function unprefixToolName(name) {
+  const stripped = name.slice(4); // remove "mcp_"
+  return stripped.charAt(0).toLowerCase() + stripped.slice(1);
+}
+
+/**
+ * Transform the request body: system prompt sanitization, billing header,
+ * and PascalCase tool prefixing. Three-block system layout:
+ * [billing_header?, identity, ...sanitized_rest].
  *
  * @param {string | undefined} body
+ * @param {{ billing_header?: boolean, emulation_profile?: string } | undefined} [headerConfig]
  * @returns {string | undefined}
  */
-function transformRequestBody(body) {
+function transformRequestBody(body, headerConfig) {
   if (!body || typeof body !== "string") return body;
-
-  const TOOL_PREFIX = "mcp_";
 
   try {
     const parsed = JSON.parse(body);
@@ -321,45 +346,20 @@ function transformRequestBody(body) {
     // Sanitize system prompt and prepend Claude Code identity
     parsed.system = prependClaudeCodeIdentity(parsed.system);
 
-    // --- Relocate non-core system entries to user messages ---
-    // Anthropic's API validates system[] content for OAuth requests.
-    // Third-party system prompts trigger a 400 rejection when they
-    // appear in `system[]`. Keep only the identity block in `system[]`
-    // and prepend everything else to the first user message.
-    if (Array.isArray(parsed.system) && parsed.system.length > 1) {
-      const kept = [parsed.system[0]]; // identity block
-      const movedTexts = [];
-
-      for (let i = 1; i < parsed.system.length; i++) {
-        const entry = parsed.system[i];
-        const txt = typeof entry === "string" ? entry : (entry?.text ?? "");
-        if (txt.length > 0) movedTexts.push(txt);
-      }
-
-      if (movedTexts.length > 0 && Array.isArray(parsed.messages)) {
-        const firstUser = parsed.messages.find((m) => m.role === "user");
-
-        if (firstUser) {
-          parsed.system = kept;
-          const prefix = movedTexts.join("\n\n");
-
-          if (typeof firstUser.content === "string") {
-            firstUser.content = `${prefix}\n\n${firstUser.content}`;
-          } else if (Array.isArray(firstUser.content)) {
-            firstUser.content.unshift({ type: "text", text: prefix });
-          }
-        }
-      }
+    // Add billing header as first system block (before identity)
+    if (headerConfig?.billing_header && Array.isArray(parsed.system)) {
+      const billingText = buildBillingHeaderValue(parsed.messages, headerConfig.emulation_profile);
+      parsed.system.unshift({ type: "text", text: billingText });
     }
 
-    // Add prefix to tools definitions
+    // Add PascalCase prefix to tools definitions
     if (parsed.tools && Array.isArray(parsed.tools)) {
       parsed.tools = parsed.tools.map((tool) => ({
         ...tool,
-        name: tool.name ? `${TOOL_PREFIX}${tool.name}` : tool.name,
+        name: tool.name ? prefixToolName(tool.name) : tool.name,
       }));
     }
-    // Add prefix to tool_use blocks in messages
+    // Add PascalCase prefix to tool_use blocks in messages
     if (parsed.messages && Array.isArray(parsed.messages)) {
       parsed.messages = parsed.messages.map((msg) => {
         if (msg.content && Array.isArray(msg.content)) {
@@ -367,7 +367,7 @@ function transformRequestBody(body) {
             if (block.type === "tool_use" && block.name) {
               return {
                 ...block,
-                name: `${TOOL_PREFIX}${block.name}`,
+                name: prefixToolName(block.name),
               };
             }
             return block;
@@ -524,8 +524,9 @@ function stripMcpPrefixFromSSE(text) {
 }
 
 /**
- * Mutate a parsed SSE event object, removing `mcp_` prefix from tool_use
- * name fields. Returns true if any modification was made.
+ * Mutate a parsed SSE event object, removing PascalCase `mcp_` prefix from
+ * tool_use name fields and restoring the original lowercase first char.
+ * Returns true if any modification was made.
  *
  * @param {any} parsed
  * @returns {boolean}
@@ -542,7 +543,7 @@ function stripMcpPrefixFromParsedEvent(parsed) {
     typeof parsed.content_block.name === "string" &&
     parsed.content_block.name.startsWith("mcp_")
   ) {
-    parsed.content_block.name = parsed.content_block.name.slice(4);
+    parsed.content_block.name = unprefixToolName(parsed.content_block.name);
     modified = true;
   }
 
@@ -550,7 +551,7 @@ function stripMcpPrefixFromParsedEvent(parsed) {
   if (parsed.message && Array.isArray(parsed.message.content)) {
     for (const block of parsed.message.content) {
       if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith("mcp_")) {
-        block.name = block.name.slice(4);
+        block.name = unprefixToolName(block.name);
         modified = true;
       }
     }
@@ -560,7 +561,7 @@ function stripMcpPrefixFromParsedEvent(parsed) {
   if (Array.isArray(parsed.content)) {
     for (const block of parsed.content) {
       if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith("mcp_")) {
-        block.name = block.name.slice(4);
+        block.name = unprefixToolName(block.name);
         modified = true;
       }
     }
@@ -1575,9 +1576,8 @@ export async function AnthropicAuthPlugin({ client }) {
         }
       }
       output.system.unshift(prefix);
-      if (config.headers.billing_header) {
-        output.system.unshift(getBillingHeaderBlock(config.headers.emulation_profile));
-      }
+      // Billing header is now computed in transformRequestBody() where messages
+      // are available for content-based CCH hashing.
     },
     config: async (input) => {
       input.command ??= {};
@@ -1641,7 +1641,7 @@ export async function AnthropicAuthPlugin({ client }) {
 
               // Transform body and URL once (shared across retries)
               const requestInit = init ?? {};
-              const body = transformRequestBody(requestInit.body);
+              const body = transformRequestBody(requestInit.body, config.headers);
               const modelName = extractModelName(body);
               const { requestInput, requestUrl } = transformRequestUrl(input);
               const requestMethod = String(

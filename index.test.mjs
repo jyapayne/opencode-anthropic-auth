@@ -638,11 +638,12 @@ describe("fetch interceptor", () => {
     const body = JSON.parse(init.body);
     // Identity block is the Claude Agent SDK string
     expect(body.system[0].text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
-    // System should only have the identity block (non-core relocated to user message)
-    expect(body.system).toHaveLength(1);
-    // Relocated content in first user message
-    expect(body.messages[0].content).toContain("You are an interactive CLI tool.");
-    expect(body.messages[0].content).not.toContain("best coding agent on the planet");
+    // System keeps sanitized content (no relocation to user messages)
+    expect(body.system).toHaveLength(2);
+    expect(body.system[1].text).toContain("You are an interactive CLI tool.");
+    expect(body.system[1].text).not.toContain("best coding agent on the planet");
+    // User message remains unchanged
+    expect(body.messages[0].content).toBe("hello");
   });
 
   it("strips paragraphs containing OpenCode-specific URLs", async () => {
@@ -663,10 +664,13 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(body.system).toHaveLength(1);
-    // github.com/anomalyco/opencode paragraph removed
-    expect(body.messages[0].content).not.toContain("github.com/anomalyco/opencode");
-    expect(body.messages[0].content).toContain("You are an interactive CLI tool.");
+    // System keeps sanitized content (no relocation)
+    expect(body.system).toHaveLength(2);
+    // github.com/anomalyco/opencode paragraph removed from system text
+    expect(body.system[1].text).not.toContain("github.com/anomalyco/opencode");
+    expect(body.system[1].text).toContain("You are an interactive CLI tool.");
+    // User message remains unchanged
+    expect(body.messages[0].content).toBe("hello");
   });
 
   it("preserves paths containing opencode in system prompt", async () => {
@@ -684,8 +688,9 @@ describe("fetch interceptor", () => {
     const body = JSON.parse(init.body);
     // Identity block prepended
     expect(body.system[0].text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
-    // Non-core content relocated to first user message
-    expect(body.messages[0].content).toContain("Working dir: /Users/rmk/projects/opencode-auth");
+    // Non-core content stays in system (no relocation)
+    expect(body.system).toHaveLength(2);
+    expect(body.system[1].text).toContain("Working dir: /Users/rmk/projects/opencode-auth");
   });
 
   it("prefixes tool names with mcp_ in request", async () => {
@@ -706,8 +711,8 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    expect(body.tools[0].name).toBe("mcp_read_file");
-    expect(body.messages[0].content[0].name).toBe("mcp_read_file");
+    expect(body.tools[0].name).toBe("mcp_Read_file");
+    expect(body.messages[0].content[0].name).toBe("mcp_Read_file");
   });
 
   it("strips mcp_ prefix from tool names in response stream", async () => {
@@ -778,9 +783,9 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    // Must become mcp_mcp_server so that response stripping restores the original name
-    expect(body.tools[0].name).toBe("mcp_mcp_server");
-    expect(body.messages[0].content[0].name).toBe("mcp_mcp_server");
+    // Must become mcp_Mcp_server so that response stripping restores the original name
+    expect(body.tools[0].name).toBe("mcp_Mcp_server");
+    expect(body.messages[0].content[0].name).toBe("mcp_Mcp_server");
   });
 
   it("round-trips mcp_-prefixed tool names correctly", async () => {
@@ -1001,7 +1006,7 @@ describe("system prompt transform", () => {
     ).toHaveLength(0);
   });
 
-  it("includes billing header when config enables it", async () => {
+  it("does not include billing header in hook (moved to transformRequestBody)", async () => {
     const client = makeClient();
     // Enable billing_header via config mock
     const { loadConfig } = await import("./lib/config.mjs");
@@ -1015,10 +1020,10 @@ describe("system prompt transform", () => {
     const output = { system: ["You are a helpful assistant."] };
     plugin["experimental.chat.system.transform"]({ model: { providerID: "anthropic" } }, output);
 
-    expect(output.system).toHaveLength(3);
-    expect(output.system[0]).toMatch(BILLING_RE);
-    expect(output.system[1]).toBe(PREFIX);
-    expect(output.system[2]).toBe("You are a helpful assistant.");
+    // Billing header is now computed in transformRequestBody where messages are available for CCH
+    expect(output.system).toHaveLength(2);
+    expect(output.system[0]).toBe(PREFIX);
+    expect(output.system[1]).toBe("You are a helpful assistant.");
   });
 
   it("mutates the system array in place (preserves caller reference)", async () => {
