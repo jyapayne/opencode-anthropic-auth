@@ -813,6 +813,33 @@ describe("fetch interceptor", () => {
     expect(text).not.toContain("mcp_mcp_server");
   });
 
+  it("preserves StructuredOutput tool name casing on round-trip", async () => {
+    // StructuredOutput is sent by Claude Code verbatim (PascalCase) and must
+    // come back as "StructuredOutput", not "structuredOutput".  Upstream fix
+    // ported from ex-machina-co/opencode-anthropic-auth v1.7.0.
+    const responseBody =
+      'data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp_StructuredOutput","id":"t1"}}\n\n';
+    mockFetch.mockResolvedValueOnce(
+      new Response(responseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    const response = await fetchFn("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        tools: [{ name: "StructuredOutput", description: "Structured output tool" }],
+        messages: [],
+      }),
+    });
+
+    const text = await response.text();
+    expect(text).toContain('"name":"StructuredOutput"');
+    expect(text).not.toContain("structuredOutput");
+    expect(text).not.toContain("mcp_StructuredOutput");
+  });
+
   it("does not strip mcp_ from text content in response stream", async () => {
     // A text content block that happens to contain "name": "mcp_foo" — should NOT be modified
     const responseBody =

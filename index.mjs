@@ -320,11 +320,16 @@ function prefixToolName(name) {
  * Restore original tool name from a PascalCase mcp_-prefixed name.
  * e.g. "mcp_Read_file" → "read_file"
  *
+ * Special case: `StructuredOutput` is emitted and consumed in PascalCase,
+ * so it must round-trip unchanged (not be lowercased to "structuredOutput").
+ * See ex-machina-co/opencode-anthropic-auth v1.7.0.
+ *
  * @param {string} name
  * @returns {string}
  */
 function unprefixToolName(name) {
   const stripped = name.slice(4); // remove "mcp_"
+  if (stripped === "StructuredOutput") return stripped;
   return stripped.charAt(0).toLowerCase() + stripped.slice(1);
 }
 
