@@ -3422,6 +3422,7 @@ function prefixToolName(name) {
 }
 function unprefixToolName(name) {
   const stripped = name.slice(4);
+  if (stripped === "StructuredOutput") return stripped;
   return stripped.charAt(0).toLowerCase() + stripped.slice(1);
 }
 function transformRequestBody(body, headerConfig) {
