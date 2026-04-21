@@ -183,15 +183,57 @@ var CLAUDE_CLI_2_1_96_PROFILE = {
     opus: ["context-management-2025-06-27"]
   }
 };
+var CLAUDE_CLI_2_1_117_PROFILE = {
+  // Extracted from Claude Code 2.1.117 binary
+  // (VERSION="2.1.117", BUILD_TIME="2026-04-21T17:58:52Z",
+  //  GIT_SHA="5e9d59ce46d5559e3510d71ef3dc12b5ab1e7387").
+  // SDK package version confirmed from binary: l8H="0.81.0".
+  // User-agent is built as `claude-cli/${VERSION} (external, ${CLAUDE_CODE_ENTRYPOINT ?? "cli"})`;
+  // non-interactive / piped invocations set the entrypoint to "sdk-cli", matching the
+  // 2.1.96 live-capture format — we keep "sdk-cli" since plugin traffic is always
+  // non-TTY from Anthropic's perspective.
+  // Billing header and beta list derived from the 2.1.96 live capture; 2.1.117 only
+  // bumps the version string. New binary-defined betas (fast-mode-2026-02-01,
+  // redact-thinking-2026-02-12, advanced-tool-use-2025-11-20, etc.) are conditionally
+  // added by the CLI at runtime and not sent on every request, so we mirror the
+  // conservative 2.1.96 default here.
+  ccVersion: "2.1.117",
+  headers: {
+    accept: "application/json",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "user-agent": "claude-cli/2.1.117 (external, sdk-cli)",
+    "x-app": "cli",
+    "x-stainless-arch": "x64",
+    "x-stainless-lang": "js",
+    "x-stainless-os": "Linux",
+    "x-stainless-package-version": "0.81.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v24.3.0",
+    "x-stainless-timeout": "600"
+  },
+  betaBase: [
+    "claude-code-20250219",
+    "oauth-2025-04-20",
+    "interleaved-thinking-2025-05-14",
+    "prompt-caching-scope-2026-01-05",
+    "effort-2025-11-24"
+  ],
+  betaByModel: {
+    opus: ["context-management-2025-06-27"]
+  }
+};
 var HEADER_PROFILES = {
-  "claude-cli-default": CLAUDE_CLI_2_1_96_PROFILE,
+  "claude-cli-default": CLAUDE_CLI_2_1_117_PROFILE,
   "claude-cli-2.1.50": CLAUDE_CLI_2_1_50_PROFILE,
   "claude-cli-2.1.75": CLAUDE_CLI_2_1_75_PROFILE,
   "claude-cli-2.1.79": CLAUDE_CLI_2_1_79_PROFILE,
   "claude-cli-2.1.91": CLAUDE_CLI_2_1_91_PROFILE,
-  "claude-cli-2.1.96": CLAUDE_CLI_2_1_96_PROFILE
+  "claude-cli-2.1.96": CLAUDE_CLI_2_1_96_PROFILE,
+  "claude-cli-2.1.117": CLAUDE_CLI_2_1_117_PROFILE
 };
-var DEFAULT_HEADER_PROFILE = "claude-cli-2.1.96";
+var DEFAULT_HEADER_PROFILE = "claude-cli-2.1.117";
 function getHeaderProfile(profileName) {
   if (profileName && HEADER_PROFILES[profileName]) {
     return HEADER_PROFILES[profileName];
@@ -3370,9 +3412,15 @@ function extractModelName(body) {
   return void 0;
 }
 var OPENCODE_IDENTITY_PREFIX = "You are OpenCode";
-var CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+var CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 var PARAGRAPH_REMOVAL_ANCHORS = ["github.com/anomalyco/opencode", "opencode.ai/docs"];
-var TEXT_REPLACEMENTS = [{ match: "if OpenCode honestly", replacement: "if the assistant honestly" }];
+var TEXT_REPLACEMENTS = [
+  { match: "if OpenCode honestly", replacement: "if the assistant honestly" },
+  {
+    match: "Here is some useful information about the environment you are running in:",
+    replacement: "Environment context you are running in:"
+  }
+];
 function sanitizeSystemText(text) {
   const paragraphs = text.split(/\n\n+/);
   const filtered = paragraphs.filter((paragraph) => {
