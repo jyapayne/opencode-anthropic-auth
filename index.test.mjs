@@ -571,7 +571,7 @@ describe("fetch interceptor", () => {
     expect(headers.get("accept")).toBe("application/json");
     expect(headers.get("anthropic-version")).toBe("2023-06-01");
     expect(headers.get("anthropic-dangerous-direct-browser-access")).toBe("true");
-    expect(headers.get("user-agent")).toBe("claude-cli/2.1.96 (external, sdk-cli)");
+    expect(headers.get("user-agent")).toBe("claude-cli/2.1.117 (external, sdk-cli)");
     expect(headers.get("x-app")).toBe("cli");
     expect(headers.get("x-stainless-arch")).toBe("x64");
     expect(headers.get("x-stainless-lang")).toBe("js");
@@ -636,8 +636,8 @@ describe("fetch interceptor", () => {
 
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
-    // Identity block is the Claude Agent SDK string
-    expect(body.system[0].text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+    // Identity block is the interactive Claude Code opening (matches binary var `Mp8`)
+    expect(body.system[0].text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
     // System keeps sanitized content (no relocation to user messages)
     expect(body.system).toHaveLength(2);
     expect(body.system[1].text).toContain("You are an interactive CLI tool.");
@@ -687,7 +687,7 @@ describe("fetch interceptor", () => {
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     // Identity block prepended
-    expect(body.system[0].text).toBe("You are a Claude agent, built on Anthropic's Claude Agent SDK.");
+    expect(body.system[0].text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
     // Non-core content stays in system (no relocation)
     expect(body.system).toHaveLength(2);
     expect(body.system[1].text).toContain("Working dir: /Users/rmk/projects/opencode-auth");
@@ -967,7 +967,7 @@ describe("fetch interceptor", () => {
 
 describe("system prompt transform", () => {
   const BILLING_RE = /^x-anthropic-billing-header: cc_version=[\d.a-z]+; cc_entrypoint=cli; cch=[0-9a-f]{5};$/;
-  const PREFIX = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+  const PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
   it("prepends Claude Code prefix for anthropic provider", async () => {
     const client = makeClient();

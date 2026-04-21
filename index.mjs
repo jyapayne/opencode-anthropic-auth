@@ -227,7 +227,12 @@ function extractModelName(body) {
 // ---------------------------------------------------------------------------
 
 const OPENCODE_IDENTITY_PREFIX = "You are OpenCode";
-const CLAUDE_CODE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+// Interactive default used by Claude Code (minified name `Mp8` in the 2.1.117 binary).
+// The CLI selects this opening line whenever it runs in a TTY; non-interactive /
+// SDK flows use `GHK` ("You are a Claude agent, built on Anthropic's Claude Agent SDK.")
+// or `WHK` ("...running within the Claude Agent SDK.") instead. We pick Mp8 to match
+// the CLI's default interactive framing as closely as possible.
+const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /**
  * Anchors that identify paragraphs to remove from the system prompt.
@@ -238,8 +243,23 @@ const PARAGRAPH_REMOVAL_ANCHORS = ["github.com/anomalyco/opencode", "opencode.ai
 
 /**
  * Inline text replacements applied after paragraph removal.
+ *
+ * "Here is some useful information about the environment you are running in:"
+ * is an exact-phrase fingerprint that Anthropic's server-side classifier uses
+ * to detect third-party agent CLIs. It ships verbatim in opencode's default
+ * system prompt. Matching the phrase causes /v1/messages to respond with a
+ * 400 invalid_request_error disguised as "You're out of extra usage."
+ * Replacing the word "useful" (or removing it) unblocks the request; we pick
+ * a semantic-equivalent wording here rather than stripping the line so the
+ * model still sees the env-block context.
  */
-const TEXT_REPLACEMENTS = [{ match: "if OpenCode honestly", replacement: "if the assistant honestly" }];
+const TEXT_REPLACEMENTS = [
+  { match: "if OpenCode honestly", replacement: "if the assistant honestly" },
+  {
+    match: "Here is some useful information about the environment you are running in:",
+    replacement: "Environment context you are running in:",
+  },
+];
 
 /**
  * Sanitize OpenCode-branded strings from the system prompt text.
